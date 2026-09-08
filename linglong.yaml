@@ -1,0 +1,123 @@
+version: "1"
+
+package:
+  id: uos.app.q4wine
+  name: Q4Wine
+  version: 1.3.13.0
+  kind: app
+  description: |
+    Q4Wine will help you manage wine prefixes and installed applications.
+    General features:
+     - Can export Qt color theme into wine colors settings.
+     - Can easy work with different wine versions at same time.
+     - Easy creating, deleting and managing prefixes (WINEPREFIX).
+     - Easy controlling for wine process.
+     - Easy installer wizard for wine applications.
+     - Autostart icons support.
+     - Easy CD-image use.
+     - You can extract icons from PE files (.exe .dll).
+     - Easy backup and restore for managed prefixes.
+     - Winetricks support.
+
+command:
+  - /opt/apps/uos.app.q4wine/files/bin/q4wine
+
+base: org.deepin.base/23.1.0
+runtime: org.deepin.runtime.dtk/23.1.0
+
+sources:
+  - kind: archive
+    url: https://share.cicd.getdeepin.org/ziggy-pool/linyaps-apps-packaging-CI/25M8.top500-init.stage-1.sysRepo/q4wine_1.3.13.orig.tar.bz2
+    digest: 38c41d7cbea7623e48ef83996d03da3f43b0a9c657766b843b806a4095289c73
+  - kind: archive
+    url: https://share.cicd.getdeepin.org/ziggy-pool/linyaps-apps-packaging-CI/25M8.top500-init.stage-1.sysRepo/q4wine_1.3.13-1.debian.tar.xz
+    digest: f9b2ef8eda5cac62819f7806a84cb98fa2ea7fca7649cb9d56be318bce17b662
+
+buildext:
+  apt:
+    depends:
+      - icoutils
+      - libqt5sql5-sqlite
+
+build: |
+  set -e
+
+  # fix dead apt source baked into base (backup/rc2 no longer available)
+  cat > /etc/apt/sources.list <<'APT'
+  deb [trusted=yes] https://ci.deepin.com/repo/deepin/deepin-community/stable beige main
+  APT
+  echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/99linglong-builder.conf
+  apt-get update -y
+
+  # build-time tooling (cmake from apt crashes with a libuv uv_spawn assertion
+  # in this container, so we use the official statically-linked Kitware binary)
+  DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      build-essential patch \
+      qtbase5-dev qttools5-dev qttools5-dev-tools libqt5svg5-dev \
+      icoutils
+
+  mkdir -p /opt/cmake
+  cd /opt/cmake
+  curl -sL -o cmake.tar.gz \
+      https://github.com/Kitware/CMake/releases/download/v3.29.3/cmake-3.29.3-linux-x86_64.tar.gz
+  tar xzf cmake.tar.gz
+  export PATH=/opt/cmake/cmake-3.29.3-linux-x86_64/bin:$PATH
+  cmake --version
+
+  SRC=/project/linglong/sources/q4wine_1.3.13.orig.tar.bz2/q4wine-1.3.13
+  DEB=/project/linglong/sources/q4wine_1.3.13-1.debian.tar.xz/debian
+
+  cd $SRC
+
+  # apply the Debian patch series (documentation URL fixes)
+  for p in $(cat $DEB/patches/series); do
+    patch -p1 < $DEB/patches/$p
+  done
+
+  mkdir -p build
+  cd build
+  cmake .. \
+      -DCMAKE_INSTALL_PREFIX=$PREFIX \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DQT5=ON \
+      -DLIBS_ENTRY_PATH=$PREFIX/lib/q4wine \
+      -DWITH_WINEAPPDB=OFF \
+      -DUSE_GZIP=ON
+
+  make -j$(nproc)
+
+  make install
+
+  # rename the desktop entry to match the app id for linglong desktop integration
+  if [ -f $PREFIX/share/applications/q4wine.desktop ]; then
+    mv $PREFIX/share/applications/q4wine.desktop $PREFIX/share/applications/uos.app.q4wine.desktop
+  fi
+
+  # bundle runtime deps into $PREFIX (the auto buildext apt step cannot reach
+  # the deps because the base's baked-in apt source backup/rc2 is gone, so we
+  # ship the ones we already installed from the stable mirror during build)
+  for b in wrestool icotool extresso genresscript; do
+    if [ -x /usr/bin/$b ]; then
+      install -D -m 755 /usr/bin/$b $PREFIX/bin/$b
+    fi
+  done
+
+  SOQL=/usr/lib/x86_64-linux-gnu/qt5/plugins/sqldrivers/libqsqlite.so
+  if [ -f "$SOQL" ]; then
+    install -D -m 755 "$SOQL" $PREFIX/lib/x86_64-linux-gnu/qt5/plugins/sqldrivers/libqsqlite.so
+  fi
+
+  for lib in libQt5Sql.so.5.15.8 libQt5Core.so.5.15.8 libdouble-conversion.so.3.1; do
+    if [ -f /usr/lib/x86_64-linux-gnu/$lib ]; then
+      install -D -m 755 /usr/lib/x86_64-linux-gnu/$lib $PREFIX/lib/x86_64-linux-gnu/$lib
+    fi
+  done
+  cd $PREFIX/lib/x86_64-linux-gnu
+  ln -sf libQt5Sql.so.5.15.8 libQt5Sql.so.5
+  ln -sf libQt5Sql.so.5.15.8 libQt5Sql.so.5.15
+  ln -sf libQt5Core.so.5.15.8 libQt5Core.so.5
+  ln -sf libQt5Core.so.5.15.8 libQt5Core.so.5.15
+  ln -sf libdouble-conversion.so.3.1 libdouble-conversion.so.3
+
+  echo "=== installed files ==="
+  find $PREFIX -maxdepth 6 \( -type f -o -type l \) | sort
